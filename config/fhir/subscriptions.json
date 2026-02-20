@@ -9,8 +9,44 @@
     {
       "name": "lab-result-processor",
       "criteria": "Observation?category=laboratory",
-      "reason": "Process new lab results for coding validation and critical value alerts",
+      "reason": "Process new lab results for Construe LOINC coding validation and critical value alerts",
       "botName": "lab-result-processor"
+    },
+    {
+      "name": "document-processor",
+      "criteria": "DocumentReference",
+      "reason": "Run PhenoML extraction on uploaded clinical documents",
+      "botName": "document-processor"
+    },
+    {
+      "name": "notification-sender-communication",
+      "criteria": "Communication",
+      "reason": "Send email/SMS notification when a new secure message is created",
+      "botName": "notification-sender"
+    },
+    {
+      "name": "notification-sender-appointment",
+      "criteria": "Appointment",
+      "reason": "Send appointment confirmation/cancellation notifications to patients",
+      "botName": "notification-sender"
+    },
+    {
+      "name": "adt-handler",
+      "criteria": "Encounter",
+      "reason": "Post-process ADT-originated Encounters (validate demographics, trigger EMR sync)",
+      "botName": "adt-handler"
+    },
+    {
+      "name": "oru-handler",
+      "criteria": "DiagnosticReport",
+      "reason": "Post-process ORU-originated DiagnosticReports (run Construe coding, check critical values)",
+      "botName": "oru-handler"
+    },
+    {
+      "name": "siu-handler",
+      "criteria": "Appointment",
+      "reason": "Post-process SIU-originated Appointments (sync to external EMRs, send confirmations)",
+      "botName": "siu-handler"
     },
     {
       "name": "epic-sync-trigger",
@@ -29,6 +65,18 @@
       "criteria": "Patient,Encounter,Observation,Condition,MedicationRequest",
       "reason": "Trigger Athena sync when clinical resources are modified locally",
       "botName": "athena-sync"
+    },
+    {
+      "name": "consent-enforcer",
+      "criteria": "Consent",
+      "reason": "Update access policies when patient consent preferences change",
+      "botName": "consent-enforcer"
+    },
+    {
+      "name": "audit-logger",
+      "criteria": "AuditEvent",
+      "reason": "Enhanced audit logging for compliance — enrich and index AuditEvents",
+      "botName": "audit-logger"
     }
   ]
 }

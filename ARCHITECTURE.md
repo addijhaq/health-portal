@@ -118,6 +118,11 @@ These are the FHIR R4 resources the portal will manage:
 | `Claim` / `ExplanationOfBenefit` | Billing data |
 | `Consent` | Patient consent records |
 | `AuditEvent` | Security audit trail |
+| `RelatedPerson` | Emergency contacts, next of kin (from HL7 NK1) |
+| `Provenance` | Tracks origin of imported/generated resources |
+| `Task` | Manual review items (MPI ambiguous matches, conflict review) |
+| `DetectedIssue` | Flagged data conflicts from multi-source sync |
+| `Parameters` | Sync state storage (last sync timestamps per vendor) |
 
 #### 1.3 — Authentication & Authorization
 - OAuth 2.0 / SMART on FHIR implementation (built into Medplum)
@@ -177,13 +182,13 @@ A set of Medplum Bots that handle synchronization logic:
 
 | Bot | Trigger | Purpose |
 |---|---|---|
-| `epic-sync-bot` | Cron (every 15 min) + Subscription | Pull/push data to Epic FHIR API |
-| `cerner-sync-bot` | Cron (every 15 min) + Subscription | Pull/push data to Cerner FHIR API |
-| `athena-sync-bot` | Cron (every 15 min) + Subscription | Pull/push data to athenahealth API |
-| `conflict-resolver-bot` | Subscription (on merge conflict) | Resolve conflicting updates across systems |
-| `patient-match-bot` | Subscription (new Patient) | MPI-style matching across systems |
+| `emr-sync-epic` | Cron (every 15 min) + Subscription | Pull/push data to Epic FHIR API |
+| `emr-sync-cerner` | Cron (every 15 min) + Subscription | Pull/push data to Cerner FHIR API |
+| `emr-sync-athena` | Cron (every 15 min) + Subscription | Pull/push data to athenahealth API |
 
-Each bot:
+**Note:** Patient matching (MPI) and conflict resolution are functions *within* each sync bot (see Phase 3c and 3d), not separate bots.
+
+Each sync bot:
 1. Authenticates with the external EMR using stored credentials
 2. Queries for new/updated resources since last sync timestamp
 3. Maps and transforms FHIR resources (handling vendor-specific extensions)
@@ -245,10 +250,12 @@ HL7 v2 Message → Parser → Transformer → FHIR Bundle → Medplum FHIR API
 | TXA | DocumentReference |
 | IN1/IN2 | Coverage |
 
+**Data flow:** The HL7 engine is a standalone TCP service (not a Medplum Bot). It receives raw HL7 messages, transforms them to FHIR Bundles, and writes them to Medplum via the FHIR API. Post-processing (e.g., Construe coding, EMR sync triggers) is handled by Medplum Bots triggered by FHIR Subscriptions on the created resources (see Module 5).
+
 #### 3.5 — FHIR R4 → HL7 v2 Transformation (Outbound)
 Reverse mapping for outbound messages — Medplum Subscription triggers a bot that:
 1. Receives FHIR resource change event
-2. Builds HL7 v2 message from FHIR data
+2. Calls the HL7 engine's outbound transform functions to build an HL7 v2 message from the FHIR data
 3. Sends via `node-hl7-client` to configured destination
 
 ---
@@ -322,18 +329,21 @@ const result = await phenoml.agents.run({
 | Bot Name | Trigger | Description |
 |---|---|---|
 | `patient-onboarding` | Subscription: new `Patient` | Run PhenoML intake processing, match against external EMRs |
-| `lab-result-processor` | HL7 ORU inbound | Transform HL7 → FHIR, run Construe for LOINC coding, notify provider |
-| `appointment-reminder` | Cron: daily | Send SMS/email reminders for upcoming appointments |
+| `lab-result-processor` | Subscription: `Observation?category=laboratory` | Run Construe for LOINC coding validation, check critical values, notify provider |
+| `notification-sender` | Subscription: `Communication`, `Appointment` + Cron: daily | Send SMS/email notifications (new messages, appointment reminders, critical results) |
 | `document-processor` | Subscription: new `DocumentReference` | Run PhenoML extraction on uploaded clinical documents |
 | `emr-sync-epic` | Cron: 15 min + Subscription | Bidirectional sync with Epic |
 | `emr-sync-cerner` | Cron: 15 min + Subscription | Bidirectional sync with Cerner |
 | `emr-sync-athena` | Cron: 15 min + Subscription | Bidirectional sync with athenahealth |
-| `hl7-adt-handler` | HL7 ADT inbound | Process admit/discharge/transfer events |
-| `hl7-oru-handler` | HL7 ORU inbound | Process lab results |
-| `hl7-siu-handler` | HL7 SIU inbound | Process scheduling events |
+| `hl7-adt-handler` | Subscription: `Encounter` | Post-process ADT-originated Encounters (validate demographics, trigger EMR sync) |
+| `hl7-oru-handler` | Subscription: `DiagnosticReport` | Post-process ORU-originated results (run Construe for LOINC coding, check critical values) |
+| `hl7-siu-handler` | Subscription: `Appointment` | Post-process SIU-originated appointments (sync to external EMRs, send confirmations) |
 | `audit-logger` | Subscription: all writes | Enhanced audit logging for compliance |
 | `consent-enforcer` | Subscription: `Consent` changes | Update access policies based on patient consent |
-| `notification-sender` | Subscription: `Communication`, `Appointment` + Cron | Send SMS/email notifications (new messages, appointment reminders, critical results) |
+
+**HL7 data flow clarification:** The HL7 v2 interface engine (`packages/hl7-engine`) handles all raw HL7 message parsing and FHIR transformation. It writes FHIR resources to Medplum. The `hl7-*-handler` bots above are *post-processing* bots — they are triggered by FHIR subscriptions on the resources the HL7 engine creates, not by raw HL7 messages directly. The HL7 engine itself is not a Medplum Bot; it is a standalone TCP service.
+
+**Subscription overlap note:** Both `siu-handler` and `notification-sender` subscribe to `Appointment`. To avoid duplicate processing, the HL7 engine should tag resources it creates with `meta.tag = { system: "http://health-portal/origin", code: "hl7-v2" }`. The `hl7-*-handler` bots should check for this tag and skip resources that don't have it. The `notification-sender` handles all appointment notifications regardless of origin.
 
 #### 5.2 — Subscription Configuration
 Each subscription is defined as a FHIR `Subscription` resource. The `criteria` field is a FHIR resource type (optionally with search parameters) — the subscription fires on any create/update matching that criteria:
@@ -371,118 +381,122 @@ Each subscription is defined as a FHIR `Subscription` resource. The `criteria` f
 
 #### 6.3 — Access Policies
 ```
-Patient → can read/write own: Patient, Appointment, Communication, Consent
-Provider → can read/write panel: all clinical resources for assigned patients
-Admin → full access with audit trail (defined in config/fhir/access-policies.json)
-System (Bots) → scoped access per bot function (one ClientApplication per bot group)
+Patient → read own: Patient, Observation, Condition, MedicationRequest, AllergyIntolerance,
+          Immunization, DiagnosticReport, DocumentReference, Encounter, Coverage, Schedule, Slot
+          read/write own: Appointment, Communication, Consent
+Provider → read/write panel: all clinical resources for assigned patients
+Admin → full access with audit trail
+Bot (EMR Sync) → scoped to clinical resources, AuditEvent, Parameters, DetectedIssue, Task
 ```
 
-**Note:** An Admin access policy must be added to `config/fhir/access-policies.json` alongside the existing Patient and Provider policies. Admin policy grants unrestricted access but requires all operations to be logged via AuditEvent.
+Admin and Bot access policies are defined in `config/fhir/access-policies.json` and uploaded to Medplum during Phase 1c via `scripts/setup-subscriptions.ts`.
 
 ---
 
 ## Project Structure
 
+> Files marked with `✓` already exist. Unmarked files are planned and will be created during the indicated phase.
+
 ```
 health-portal/
-├── ARCHITECTURE.md                  # This document
-├── package.json                     # Root workspace config
-├── tsconfig.json                    # Root TypeScript config
-├── docker-compose.yml               # Local dev environment
-├── medplum.config.json              # Medplum bot deployment config
+├── ARCHITECTURE.md              ✓   # This document
+├── package.json                 ✓   # Root workspace config
+├── tsconfig.json                ✓   # Root TypeScript config
+├── docker-compose.yml           ✓   # Local dev environment
+├── medplum.config.json          ✓   # Medplum bot deployment config
+├── .env.example                 ✓   # Environment variable template
 │
 ├── packages/
-│   ├── core/                        # Shared types, utilities, constants
+│   ├── core/                    ✓   # Shared types, utilities, constants
 │   │   ├── src/
-│   │   │   ├── types/               # FHIR type extensions, custom types
-│   │   │   ├── constants/           # Code systems, identifiers, config
-│   │   │   ├── utils/               # Shared utility functions
-│   │   │   └── index.ts
-│   │   ├── package.json
-│   │   └── tsconfig.json
+│   │   │   ├── types/index.ts   ✓
+│   │   │   ├── constants/index.ts ✓
+│   │   │   ├── utils/index.ts   ✓
+│   │   │   └── index.ts         ✓
+│   │   ├── package.json         ✓
+│   │   └── tsconfig.json        ✓
 │   │
-│   ├── bots/                        # Medplum Bots (server-side logic)
+│   ├── bots/                    ✓   # Medplum Bots (server-side logic)
 │   │   ├── src/
 │   │   │   ├── emr-sync/
-│   │   │   │   ├── epic-sync.ts
-│   │   │   │   ├── cerner-sync.ts
-│   │   │   │   ├── athena-sync.ts
-│   │   │   │   └── sync-utils.ts
-│   │   │   ├── hl7-handlers/
-│   │   │   │   ├── adt-handler.ts
-│   │   │   │   ├── oru-handler.ts
-│   │   │   │   ├── siu-handler.ts
-│   │   │   │   └── hl7-fhir-mapper.ts
+│   │   │   │   ├── epic-sync.ts    ✓
+│   │   │   │   ├── cerner-sync.ts  ✓
+│   │   │   │   ├── athena-sync.ts  ✓
+│   │   │   │   └── sync-utils.ts       # Phase 3d
+│   │   │   ├── hl7-handlers/           # Post-processing bots (not HL7 parsing — see Module 3)
+│   │   │   │   ├── adt-handler.ts  ✓
+│   │   │   │   ├── oru-handler.ts  ✓
+│   │   │   │   └── siu-handler.ts  ✓
 │   │   │   ├── clinical/
-│   │   │   │   ├── patient-onboarding.ts
-│   │   │   │   ├── lab-result-processor.ts
-│   │   │   │   ├── document-processor.ts
-│   │   │   │   └── appointment-reminder.ts
+│   │   │   │   ├── patient-onboarding.ts  ✓
+│   │   │   │   ├── lab-result-processor.ts ✓
+│   │   │   │   ├── document-processor.ts   # Phase 4b
+│   │   │   │   └── notification-sender.ts  # Phase 5d
 │   │   │   └── admin/
-│   │   │       ├── audit-logger.ts
-│   │   │       └── consent-enforcer.ts
-│   │   ├── package.json
-│   │   └── tsconfig.json
+│   │   │       ├── audit-logger.ts         # Phase 5f
+│   │   │       └── consent-enforcer.ts     # Phase 5e
+│   │   ├── package.json         ✓
+│   │   └── tsconfig.json        ✓
 │   │
-│   ├── hl7-engine/                  # HL7 v2 interface engine
+│   ├── hl7-engine/              ✓   # HL7 v2 interface engine (standalone TCP service)
 │   │   ├── src/
-│   │   │   ├── server.ts            # HL7 v2 TCP listener
-│   │   │   ├── client.ts            # HL7 v2 TCP sender
-│   │   │   ├── router.ts            # Message type routing
+│   │   │   ├── server.ts        ✓   # HL7 v2 MLLP listener
+│   │   │   ├── client.ts        ✓   # HL7 v2 MLLP sender
+│   │   │   ├── router.ts        ✓   # Message type routing
 │   │   │   ├── transforms/          # HL7↔FHIR transformations
-│   │   │   │   ├── adt-transform.ts
-│   │   │   │   ├── oru-transform.ts
-│   │   │   │   ├── orm-transform.ts
-│   │   │   │   ├── siu-transform.ts
-│   │   │   │   └── common.ts
-│   │   │   └── index.ts
-│   │   ├── package.json
-│   │   └── tsconfig.json
+│   │   │   │   ├── adt-transform.ts    # Phase 2b
+│   │   │   │   ├── oru-transform.ts    # Phase 2b
+│   │   │   │   ├── orm-transform.ts    # Phase 2c (outbound)
+│   │   │   │   ├── siu-transform.ts    # Phase 2b
+│   │   │   │   └── common.ts       ✓  # PID→Patient, gender, timestamp maps
+│   │   │   └── index.ts         ✓
+│   │   ├── package.json         ✓
+│   │   └── tsconfig.json        ✓
 │   │
-│   ├── phenoml/                     # PhenoML AI integration layer
+│   ├── phenoml/                 ✓   # PhenoML AI integration layer
 │   │   ├── src/
-│   │   │   ├── client.ts            # PhenoML API client
-│   │   │   ├── lang2fhir.ts         # Lang2FHIR service
-│   │   │   ├── construe.ts          # Construe medical coding service
-│   │   │   ├── agents.ts            # Agent API integration
-│   │   │   ├── workflows.ts         # Workflows API integration
-│   │   │   └── index.ts
-│   │   ├── package.json
-│   │   └── tsconfig.json
+│   │   │   ├── client.ts        ✓   # PhenoML API client
+│   │   │   ├── lang2fhir.ts     ✓   # Lang2FHIR service
+│   │   │   ├── construe.ts      ✓   # Construe medical coding service
+│   │   │   ├── agents.ts        ✓   # Agent API integration
+│   │   │   ├── workflows.ts         # Phase 4d (Workflows API)
+│   │   │   └── index.ts         ✓
+│   │   ├── package.json         ✓
+│   │   └── tsconfig.json        ✓
 │   │
-│   └── emr-connectors/              # External EMR FHIR connectors
+│   └── emr-connectors/          ✓   # External EMR FHIR connectors
 │       ├── src/
-│       │   ├── base-connector.ts     # Abstract connector class
+│       │   ├── base-connector.ts ✓   # Abstract connector class
 │       │   ├── epic/
-│       │   │   ├── epic-connector.ts
-│       │   │   ├── epic-auth.ts
-│       │   │   └── epic-mappings.ts
+│       │   │   ├── epic-connector.ts ✓
+│       │   │   ├── epic-auth.ts      # Phase 3b
+│       │   │   └── epic-mappings.ts  # Phase 3b
 │       │   ├── cerner/
-│       │   │   ├── cerner-connector.ts
-│       │   │   ├── cerner-auth.ts
-│       │   │   └── cerner-mappings.ts
+│       │   │   ├── cerner-connector.ts ✓
+│       │   │   ├── cerner-auth.ts    # Phase 3b
+│       │   │   └── cerner-mappings.ts # Phase 3b
 │       │   ├── athena/
-│       │   │   ├── athena-connector.ts
-│       │   │   ├── athena-auth.ts
-│       │   │   └── athena-mappings.ts
-│       │   └── index.ts
-│       ├── package.json
-│       └── tsconfig.json
+│       │   │   ├── athena-connector.ts ✓
+│       │   │   ├── athena-auth.ts    # Phase 3b
+│       │   │   └── athena-mappings.ts # Phase 3b
+│       │   └── index.ts         ✓
+│       ├── package.json         ✓
+│       └── tsconfig.json        ✓
 │
 ├── config/
-│   ├── fhir/                        # FHIR resource templates & profiles
-│   │   ├── access-policies.json     # Medplum access policy definitions
-│   │   ├── subscriptions.json       # Subscription definitions
-│   │   └── search-params.json       # Custom search parameters
+│   ├── fhir/
+│   │   ├── access-policies.json ✓   # Medplum access policy definitions
+│   │   ├── subscriptions.json   ✓   # Subscription definitions
+│   │   └── search-params.json       # Phase 5g (custom search parameters)
 │   └── hl7/
-│       └── message-profiles.json    # HL7 v2 message definitions
+│       └── message-profiles.json    # Phase 2a (HL7 v2 message definitions)
 │
-├── scripts/
-│   ├── seed-data.ts                 # Load test data into Medplum
-│   ├── deploy-bots.ts               # Deploy bots via Medplum CLI
-│   └── setup-subscriptions.ts       # Create FHIR subscriptions
+├── scripts/                         # All created in Phase 1
+│   ├── seed-data.ts                 # Phase 1d — Load test data into Medplum
+│   ├── deploy-bots.ts               # Phase 1e — Deploy bots via Medplum CLI
+│   └── setup-subscriptions.ts       # Phase 1c — Create FHIR subscriptions & access policies
 │
-└── tests/
+└── tests/                           # Created incrementally per phase
     ├── unit/
     ├── integration/
     └── fixtures/                    # Sample HL7 messages, FHIR bundles
@@ -512,12 +526,15 @@ health-portal/
 - [ ] Confirm `npm run build` compiles all packages (fix any TypeScript project-reference issues)
 - [ ] Add a basic Jest config to root and at least one smoke test per package
 
-#### 1c. Access policies & auth
-- [ ] Upload the Patient Portal access policy from `config/fhir/access-policies.json` to Medplum
-- [ ] Upload the Provider access policy
-- [ ] Create test Patient + Practitioner users to verify compartment-scoped access (patient can only read own data)
+#### 1c. Access policies, subscriptions & auth
+- [ ] Write `scripts/setup-subscriptions.ts` to automate uploading access policies and subscriptions to Medplum:
+  - Read `config/fhir/access-policies.json` and POST each policy as an `AccessPolicy` resource via the Medplum FHIR API
+  - Read `config/fhir/subscriptions.json` and create `Subscription` resources (requires bot IDs — run after 1e)
+- [ ] Upload all four access policies (Patient Portal, Provider, Admin, Bot-EMR-Sync) from `config/fhir/access-policies.json`
+- [ ] Create test Patient + Practitioner users and assign them the Patient Portal and Provider access policies respectively
+- [ ] Verify compartment-scoped access: authenticated as test Patient, confirm `GET /fhir/R4/Patient` returns only that patient's record; confirm `GET /fhir/R4/Observation` returns only observations where `subject` is that patient
 - [ ] Verify SMART on FHIR standalone launch flow works against Medplum's built-in OAuth server (use Postman/Insomnia against `<medplum>/auth/authorize`)
-- [ ] Document the token scopes required for patient vs. provider vs. system clients
+- [ ] Document the token scopes required for patient vs. provider vs. system clients in `.env.example` comments
 
 #### 1d. Seed data
 - [ ] Write `scripts/seed-data.ts` to populate Medplum with synthetic test data:
@@ -642,9 +659,10 @@ The base connector class (`base-connector.ts`) is already scaffolded with `authe
   3. Remap identifiers and references to local IDs
   4. POST the transaction Bundle to Medplum
 - [ ] **Export flow** (Medplum → external EMR):
-  1. Subscribe to local resource changes (Patient, Appointment, etc.)
-  2. When triggered, map the local resource to the vendor's expected format
+  1. Subscriptions are already defined in `config/fhir/subscriptions.json` (`epic-sync-trigger`, `cerner-sync-trigger`, `athena-sync-trigger`) — these fire on changes to Patient, Encounter, Observation, Condition, MedicationRequest
+  2. When triggered, the sync bot maps the local resource to the vendor's expected format using the vendor mapping functions
   3. Call `connector.write()` to push to the external EMR
+  4. Log the export result via `buildSyncAuditEvent()`
 - [ ] **Conflict resolution strategy:**
   - Last-writer-wins by default (use `Resource.meta.lastUpdated` comparison)
   - For specific resource types (MedicationRequest, AllergyIntolerance), flag conflicts for provider review instead of auto-merging — create a `DetectedIssue` resource
@@ -817,10 +835,9 @@ ATHENA_CLIENT_SECRET=<athena-client-secret>
 HL7_LISTEN_PORT=2575
 HL7_TLS_CERT_PATH=./config/tls/cert.pem
 HL7_TLS_KEY_PATH=./config/tls/key.pem
-
-# Database (managed by Medplum)
-DATABASE_URL=postgresql://medplum:medplum@localhost:5432/medplum
 ```
+
+**Note:** The PostgreSQL database is managed entirely by Medplum's Docker Compose configuration (`docker-compose.yml`). No `DATABASE_URL` env var is needed in application code — Medplum handles its own database connection internally.
 
 ---
 

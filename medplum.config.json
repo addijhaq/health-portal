@@ -13,6 +13,18 @@
       "dist": "packages/bots/dist/clinical/lab-result-processor.js"
     },
     {
+      "name": "document-processor",
+      "id": "",
+      "source": "packages/bots/src/clinical/document-processor.ts",
+      "dist": "packages/bots/dist/clinical/document-processor.js"
+    },
+    {
+      "name": "notification-sender",
+      "id": "",
+      "source": "packages/bots/src/clinical/notification-sender.ts",
+      "dist": "packages/bots/dist/clinical/notification-sender.js"
+    },
+    {
       "name": "epic-sync",
       "id": "",
       "source": "packages/bots/src/emr-sync/epic-sync.ts",
@@ -47,6 +59,18 @@
       "id": "",
       "source": "packages/bots/src/hl7-handlers/siu-handler.ts",
       "dist": "packages/bots/dist/hl7-handlers/siu-handler.js"
+    },
+    {
+      "name": "audit-logger",
+      "id": "",
+      "source": "packages/bots/src/admin/audit-logger.ts",
+      "dist": "packages/bots/dist/admin/audit-logger.js"
+    },
+    {
+      "name": "consent-enforcer",
+      "id": "",
+      "source": "packages/bots/src/admin/consent-enforcer.ts",
+      "dist": "packages/bots/dist/admin/consent-enforcer.js"
     }
   ]
 }

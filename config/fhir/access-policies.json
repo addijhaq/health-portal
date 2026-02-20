@@ -17,6 +17,8 @@
         { "resourceType": "DocumentReference", "readonly": true },
         { "resourceType": "Encounter", "readonly": true },
         { "resourceType": "Appointment" },
+        { "resourceType": "Schedule", "readonly": true },
+        { "resourceType": "Slot", "readonly": true },
         { "resourceType": "Communication" },
         { "resourceType": "Consent" },
         { "resourceType": "Coverage", "readonly": true }

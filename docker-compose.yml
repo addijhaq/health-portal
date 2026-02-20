@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   medplum-server:
-    image: medplum/medplum-server:latest
+    image: medplum/medplum-server:3.2
     ports:
       - "8103:8103"
     depends_on:
