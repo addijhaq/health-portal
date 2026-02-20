@@ -42,6 +42,35 @@
         { "resourceType": "ServiceRequest" },
         { "resourceType": "Consent", "readonly": true }
       ]
+    },
+    {
+      "name": "Admin Access",
+      "description": "Full access to all resources with audit trail. Assigned to practice administrators only.",
+      "resource": [
+        { "resourceType": "*" }
+      ]
+    },
+    {
+      "name": "Bot - EMR Sync",
+      "description": "System access for EMR sync bots. Scoped to clinical resources and AuditEvent.",
+      "resource": [
+        { "resourceType": "Patient" },
+        { "resourceType": "Encounter" },
+        { "resourceType": "Observation" },
+        { "resourceType": "Condition" },
+        { "resourceType": "MedicationRequest" },
+        { "resourceType": "AllergyIntolerance" },
+        { "resourceType": "Immunization" },
+        { "resourceType": "DiagnosticReport" },
+        { "resourceType": "DocumentReference" },
+        { "resourceType": "Appointment" },
+        { "resourceType": "Coverage" },
+        { "resourceType": "ServiceRequest" },
+        { "resourceType": "AuditEvent" },
+        { "resourceType": "Parameters" },
+        { "resourceType": "DetectedIssue" },
+        { "resourceType": "Task" }
+      ]
     }
   ]
 }

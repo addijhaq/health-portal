@@ -74,6 +74,16 @@ A FHIR-native patient portal backend for a private medical practice, built on **
 
 ## Module Breakdown
 
+> **Module ↔ Phase mapping:**
+> | Module | Implemented in |
+> |---|---|
+> | Module 1 (Medplum Core) | Phase 1 |
+> | Module 2 (EMR Interoperability) | Phase 3 |
+> | Module 3 (HL7 v2 Engine) | Phase 2 |
+> | Module 4 (PhenoML AI) | Phase 4 |
+> | Module 5 (Bots & Events) | Phases 1–4 (incrementally) |
+> | Module 6 (Security & Compliance) | Phase 1 (foundation) + Phase 5 (hardening) |
+
 ### Module 1: Medplum Core Setup
 
 **Purpose:** Stand up the FHIR server, configure authentication, and define the core data model.
@@ -323,14 +333,15 @@ const result = await phenoml.agents.run({
 | `hl7-siu-handler` | HL7 SIU inbound | Process scheduling events |
 | `audit-logger` | Subscription: all writes | Enhanced audit logging for compliance |
 | `consent-enforcer` | Subscription: `Consent` changes | Update access policies based on patient consent |
+| `notification-sender` | Subscription: `Communication`, `Appointment` + Cron | Send SMS/email notifications (new messages, appointment reminders, critical results) |
 
 #### 5.2 — Subscription Configuration
-Each subscription is defined as a FHIR `Subscription` resource:
+Each subscription is defined as a FHIR `Subscription` resource. The `criteria` field is a FHIR resource type (optionally with search parameters) — the subscription fires on any create/update matching that criteria:
 ```json
 {
   "resourceType": "Subscription",
   "status": "active",
-  "criteria": "Patient?_lastUpdated=gt2024-01-01",
+  "criteria": "Patient",
   "channel": {
     "type": "rest-hook",
     "endpoint": "Bot/<bot-id>",
@@ -338,6 +349,8 @@ Each subscription is defined as a FHIR `Subscription` resource:
   }
 }
 ```
+
+**Note:** Bot IDs in `medplum.config.json` are populated after creating Bot resources in Medplum (via the admin UI or `scripts/deploy-bots.ts`). The deploy script should create the Bot resource if it doesn't exist, then update the config file with the assigned ID.
 
 ---
 
@@ -360,9 +373,11 @@ Each subscription is defined as a FHIR `Subscription` resource:
 ```
 Patient → can read/write own: Patient, Appointment, Communication, Consent
 Provider → can read/write panel: all clinical resources for assigned patients
-Admin → full access with audit trail
-System (Bots) → scoped access per bot function
+Admin → full access with audit trail (defined in config/fhir/access-policies.json)
+System (Bots) → scoped access per bot function (one ClientApplication per bot group)
 ```
+
+**Note:** An Admin access policy must be added to `config/fhir/access-policies.json` alongside the existing Patient and Provider policies. Admin policy grants unrestricted access but requires all operations to be logged via AuditEvent.
 
 ---
 
@@ -477,46 +492,278 @@ health-portal/
 
 ## Implementation Phases
 
+> **Dependency note:** Phase 1 is a prerequisite for all other phases.
+> Phases 2, 3, and 4 can run in parallel after Phase 1 is complete.
+> Phase 5 depends on Phases 2–4 being substantially complete.
+
 ### Phase 1: Foundation (Weeks 1–3)
-- [ ] Set up Medplum server (Docker Compose for local dev)
-- [ ] Configure TypeScript monorepo with npm workspaces
-- [ ] Define core FHIR resource profiles and access policies
-- [ ] Implement OAuth 2.0 / SMART on FHIR auth flows
-- [ ] Build PhenoML client library (`packages/phenoml`)
-- [ ] Seed development data
+
+**Goal:** A running Medplum server with auth, access policies, and test data — enough for other phases to build against.
+
+#### 1a. Infrastructure
+- [ ] Launch Medplum server via `docker-compose up` (Medplum + PostgreSQL + Redis)
+- [ ] Verify FHIR R4 API is reachable at `http://localhost:8103/fhir/R4/metadata`
+- [ ] Create a Medplum project and admin user via the Medplum app (`localhost:3000`)
+- [ ] Create a ClientApplication resource for system-to-system auth (bot deploys, sync jobs)
+- [ ] Store client credentials in `.env` (not committed — use `.env.example` as template)
+
+#### 1b. Monorepo & build pipeline
+- [ ] Run `npm install` from root — verify all five workspaces resolve
+- [ ] Confirm `npm run build` compiles all packages (fix any TypeScript project-reference issues)
+- [ ] Add a basic Jest config to root and at least one smoke test per package
+
+#### 1c. Access policies & auth
+- [ ] Upload the Patient Portal access policy from `config/fhir/access-policies.json` to Medplum
+- [ ] Upload the Provider access policy
+- [ ] Create test Patient + Practitioner users to verify compartment-scoped access (patient can only read own data)
+- [ ] Verify SMART on FHIR standalone launch flow works against Medplum's built-in OAuth server (use Postman/Insomnia against `<medplum>/auth/authorize`)
+- [ ] Document the token scopes required for patient vs. provider vs. system clients
+
+#### 1d. Seed data
+- [ ] Write `scripts/seed-data.ts` to populate Medplum with synthetic test data:
+  - 10 Patients (varied demographics for MPI testing)
+  - 3 Practitioners, 1 Organization
+  - 20 Observations (vitals + lab results with LOINC codes)
+  - 5 Conditions (ICD-10-CM coded)
+  - 5 MedicationRequests (RxNorm coded)
+  - 5 Appointments (future-dated for scheduling tests)
+  - 3 DocumentReferences (with base64-encoded sample PDFs)
+- [ ] Run seed script and verify data is queryable via FHIR search
+
+#### 1e. Bot deployment pipeline
+- [ ] Create a Bot resource in Medplum (via admin UI or FHIR API `POST /fhir/R4/Bot`) — note the returned ID
+- [ ] Update `medplum.config.json` with the Bot's ID in the matching entry
+- [ ] Deploy the bot code: `npx medplum bot deploy patient-onboarding` (requires `MEDPLUM_CLIENT_ID` + `MEDPLUM_CLIENT_SECRET` env vars)
+- [ ] Create a Subscription pointing to that bot (criteria: `Patient`, channel endpoint: `Bot/<bot-id>`)
+- [ ] Verify the bot fires when a new Patient is created via the FHIR API
+- [ ] Write `scripts/deploy-bots.ts` to automate this: create Bot resources if missing, populate IDs in config, deploy all bots
+
+#### 1f. External dependency registration (start early — these have lead times)
+- [ ] Register for PhenoML API key at https://developer.pheno.ml (needed for Phase 4)
+- [ ] Register Epic App Orchard / Showroom app (sandbox approval can take 1–2 weeks, needed for Phase 3)
+- [ ] Register in Oracle Health Developer Program for Cerner sandbox credentials (needed for Phase 3)
+- [ ] Register in athenahealth Developer Portal for API access (needed for Phase 3)
+
+---
 
 ### Phase 2: HL7 v2 Interface Engine (Weeks 3–5)
-- [ ] Build HL7 v2 TCP listener and sender
-- [ ] Implement ADT message handler (admit/discharge/transfer)
-- [ ] Implement ORU message handler (lab results)
-- [ ] Implement SIU message handler (scheduling)
-- [ ] Build HL7 v2 ↔ FHIR R4 transformation layer
-- [ ] Integration tests with sample HL7 feeds
 
-### Phase 3: EMR Connectors (Weeks 5–8)
-- [ ] Build abstract base connector with common FHIR operations
-- [ ] Epic connector: auth, patient search, data sync
-- [ ] Cerner connector: auth, patient search, data sync
-- [ ] athenahealth connector: auth, patient search, data sync
-- [ ] Patient matching / MPI logic across systems
-- [ ] Conflict resolution for multi-source data
-- [ ] Bulk FHIR import/export ($export operations)
+**Goal:** Receive HL7 v2 messages over TCP, transform them to FHIR, and write to Medplum. Send outbound HL7 v2 messages when FHIR resources change.
 
-### Phase 4: Clinical AI (PhenoML) (Weeks 8–10)
-- [ ] Lang2FHIR integration for clinical note processing
-- [ ] Construe integration for automated medical coding
-- [ ] Agent API for intake automation and clinical decision support
-- [ ] Document processing pipeline (fax, PDF → FHIR)
-- [ ] Workflow definitions for recurring clinical tasks
+> Can run in parallel with Phases 3 and 4.
 
-### Phase 5: Portal Features & Hardening (Weeks 10–12)
-- [ ] Patient-facing FHIR API endpoints (scoped reads)
-- [ ] Secure messaging (Communication resources)
-- [ ] Appointment scheduling via FHIR Schedule/Slot
-- [ ] Consent management workflows
-- [ ] Comprehensive audit logging
-- [ ] HIPAA security review and penetration testing
-- [ ] Load testing and performance optimization
+#### 2a. Inbound listener
+- [ ] Implement `Hl7Server.start()` using `node-hl7-server` — open MLLP listener on port 2575
+- [ ] Parse inbound messages into segments using node-hl7-server's built-in parser
+- [ ] Extract `Hl7MessageMeta` (MSH segment: message type, trigger event, control ID, sending/receiving facility, timestamp)
+- [ ] Wire parsed messages through `Hl7Router.route()` to dispatch by message type
+- [ ] Return ACK (MSA with code AA) on success, NAK (code AE/AR) on failure
+- [ ] Add TLS support (optional, configured via `HL7_TLS_CERT_PATH` / `HL7_TLS_KEY_PATH`)
+
+#### 2b. Inbound transforms (HL7 v2 → FHIR R4)
+Each transform produces a FHIR `Bundle` of type `transaction` that is POSTed to Medplum:
+
+- [ ] **ADT transform** (`adt-transform.ts`):
+  - PID → Patient (create or update by MRN match)
+  - PV1 → Encounter (set status based on trigger: A01=in-progress, A03=finished, A04=planned)
+  - DG1 → Condition (attach to Encounter)
+  - IN1/IN2 → Coverage
+  - NK1 → RelatedPerson
+- [ ] **ORU transform** (`oru-transform.ts`):
+  - PID → Patient (lookup by MRN, do not create — if no matching Patient exists, return HL7 NAK with code AE and store the raw message in a `DocumentReference` with category `unmatched-oru` for manual resolution)
+  - OBR → DiagnosticReport (one per OBR group)
+  - OBX → Observation (one per OBX, linked to DiagnosticReport; parse value type: NM=valueQuantity, ST=valueString, CE=valueCodeableConcept)
+  - Set Observation.status from OBX-11 (F=final, P=preliminary, C=corrected)
+- [ ] **SIU transform** (`siu-transform.ts`):
+  - SCH → Appointment (start/end from SCH-11, status from trigger: S12=booked, S13=booked, S14=booked, S15=cancelled)
+  - AIG → Appointment.participant (provider reference)
+  - PID → Patient reference
+- [ ] **Common mappings** (`common.ts` — already scaffolded):
+  - PID → Patient (demographics, identifiers, telecom, address)
+  - Gender mapping (M/F/O/U → male/female/other/unknown)
+  - HL7 timestamp ↔ FHIR dateTime conversion
+
+#### 2c. Outbound sender (FHIR R4 → HL7 v2)
+- [ ] Implement `Hl7Client.send()` using `node-hl7-client` — MLLP connection with retry (3 attempts, exponential backoff)
+- [ ] Build reverse transforms for outbound messages:
+  - **ORM^O01** (outbound lab/imaging orders): ServiceRequest → ORC + OBR segments
+  - **ADT^A04** (outbound registration): Patient → MSH + PID + PV1 segments
+  - **RDE^O11** (outbound pharmacy order): MedicationRequest → RXE + RXR segments
+- [ ] Create a Medplum Subscription that triggers on new `ServiceRequest` resources and sends the ORM message to a configured downstream lab system
+
+#### 2d. Testing
+- [ ] Create HL7 v2 fixture files in `tests/fixtures/`:
+  - `adt-a01-admit.hl7`, `adt-a03-discharge.hl7`, `adt-a04-register.hl7`
+  - `oru-r01-cbc.hl7` (complete blood count), `oru-r01-bmp.hl7` (basic metabolic panel)
+  - `siu-s12-new-appointment.hl7`, `siu-s15-cancel-appointment.hl7`
+- [ ] Unit tests: each transform function receives a parsed HL7 message and returns the expected FHIR Bundle
+- [ ] Integration test: send an HL7 message to the TCP listener, verify the corresponding FHIR resources appear in Medplum
+
+---
+
+### Phase 3: EMR Connectors & Sync (Weeks 3–8)
+
+**Goal:** Authenticate with Epic, Cerner, and athenahealth sandbox FHIR APIs; pull and push patient data bidirectionally; resolve conflicts.
+
+> Can run in parallel with Phases 2 and 4.
+
+#### 3a. Vendor sandbox verification
+Registration should already be initiated in Phase 1f. This step verifies sandbox access is working:
+- [ ] **Epic:** Confirm App Orchard / Showroom approval. Generate RSA key pair for JWT auth. Verify token acquisition against the sandbox token endpoint. Make a test `GET /Patient` call.
+- [ ] **Cerner:** Verify client credentials work against the Cerner open sandbox (`fhir-open.cerner.com`) for read-only access, and the registered app sandbox for write access. Make a test `GET /Patient` call.
+- [ ] **athenahealth:** Verify API access is granted. Document which FHIR R4 resources are supported (run `GET /metadata` and parse the CapabilityStatement). List any gaps that require the proprietary Athena API as a fallback.
+
+#### 3b. Connector implementation
+The base connector class (`base-connector.ts`) is already scaffolded with `authenticate()`, `read()`, `search()`, `write()`, `pullChanges()`, and `bulkExport()`.
+
+- [ ] **Epic auth** (`epic-auth.ts`): Implement JWT assertion flow — build JWT (iss=client_id, sub=client_id, aud=token_endpoint, jti=uuid, exp=5min), sign with RS384 using private key, POST to `/oauth2/token` with `grant_type=client_credentials` + `client_assertion`
+- [ ] **Cerner auth** (`cerner-auth.ts`): Already scaffolded in `cerner-connector.ts` — verify against sandbox, handle token refresh
+- [ ] **Athena auth** (`athena-auth.ts`): Same pattern as Cerner — verify against sandbox
+- [ ] **Vendor-specific FHIR mappings** (`*-mappings.ts`): Each vendor returns FHIR R4 but with vendor-specific extensions. Write mapping functions that:
+  - Strip vendor extensions on import (or store as Extension resources)
+  - Map vendor identifier systems to local MRN identifiers
+  - Normalize CodeableConcept codings (e.g., Epic may use proprietary code systems alongside SNOMED/ICD-10)
+
+#### 3c. Patient matching (MPI)
+- [ ] Implement deterministic matching: exact match on (lastName + dateOfBirth + gender), then confirm with an additional identifier (MRN, SSN last 4)
+- [ ] Implement probabilistic matching: weighted scoring on (firstName Levenshtein distance, address similarity, phone number) with a configurable threshold (default: 0.85)
+- [ ] When a new Patient arrives from an external EMR, check for existing matches in Medplum before creating a new record
+- [ ] Link matched patients using `Patient.link` (type=`seealso`) to preserve both identities
+- [ ] Log unresolved matches (score between 0.70–0.85) for manual review via a flagged `Task` resource
+
+#### 3d. Sync engine
+- [ ] Implement `sync-utils.ts` with:
+  - `getLastSyncTimestamp(vendor)`: Read from a Medplum `Parameters` resource keyed by vendor name
+  - `setLastSyncTimestamp(vendor, timestamp)`: Update after successful sync
+  - `buildSyncAuditEvent(result: SyncResult)`: Create AuditEvent with sync stats
+- [ ] **Import flow** (external EMR → Medplum):
+  1. Call `connector.pullChanges(since, resourceTypes)` to get a Bundle of updated resources
+  2. For each resource, run patient matching to find/create the local Patient
+  3. Remap identifiers and references to local IDs
+  4. POST the transaction Bundle to Medplum
+- [ ] **Export flow** (Medplum → external EMR):
+  1. Subscribe to local resource changes (Patient, Appointment, etc.)
+  2. When triggered, map the local resource to the vendor's expected format
+  3. Call `connector.write()` to push to the external EMR
+- [ ] **Conflict resolution strategy:**
+  - Last-writer-wins by default (use `Resource.meta.lastUpdated` comparison)
+  - For specific resource types (MedicationRequest, AllergyIntolerance), flag conflicts for provider review instead of auto-merging — create a `DetectedIssue` resource
+  - Never auto-resolve conflicts on `Patient` demographics — always flag for review
+
+#### 3e. Bulk import
+- [ ] Implement `bulkExport()` for Epic and Cerner using FHIR Bulk Data Access IG:
+  1. POST to `/$export` or `/Group/{id}/$export` with `_type` parameter
+  2. Poll the status endpoint until `200 OK` with output URLs
+  3. Download NDJSON files from output URLs
+  4. Parse and import line-by-line into Medplum
+
+#### 3f. Testing
+- [ ] Unit tests for each auth flow (mock HTTP responses from vendor token endpoints)
+- [ ] Unit tests for vendor mapping functions (sample vendor FHIR resources → normalized local format)
+- [ ] Integration tests against vendor sandboxes (Epic sandbox, Cerner open sandbox) — these are slow and should be tagged for CI-only execution
+
+---
+
+### Phase 4: Clinical AI — PhenoML Integration (Weeks 3–7)
+
+**Goal:** Use PhenoML APIs to automate clinical coding, FHIR resource creation from free text, and intelligent document processing.
+
+> Can run in parallel with Phases 2 and 3. Depends only on Phase 1 (Medplum + PhenoML client library).
+
+#### 4a. PhenoML client verification
+API key registration should already be initiated in Phase 1f.
+- [ ] Verify connectivity: call a simple Construe request with a known clinical phrase (e.g., "type 2 diabetes") and confirm a valid ICD-10-CM code is returned (E11.9)
+- [ ] Configure the PhenoML → Medplum connection so Lang2FHIR can write directly to the Medplum CDR (pass Medplum base URL and system client credentials to PhenoML's fhirServer config)
+- [ ] Verify end-to-end: call Lang2FHIR with a sample clinical note and confirm the resulting FHIR resources appear in Medplum
+
+#### 4b. Lang2FHIR integration
+- [ ] Wire the `Lang2FhirService.create()` method into a Medplum Bot (`document-processor`):
+  - Input: `DocumentReference` with attached clinical note text
+  - Output: FHIR Bundle (Conditions, MedicationRequests, AllergyIntolerances, Procedures) written to Medplum with references to the source Patient
+- [ ] Wire the `Lang2FhirService.search()` method into a utility for provider-facing natural language queries (used in Phase 5 portal features)
+- [ ] Validate generated resources: check that each Condition has an ICD-10-CM or SNOMED code, each MedicationRequest has an RxNorm code
+
+#### 4c. Construe integration (medical coding)
+- [ ] Wire `ConstructService.extract()` into the `lab-result-processor` bot:
+  - When an Observation arrives without a LOINC code (e.g., from an HL7 feed that used local codes), call Construe to suggest the LOINC code
+  - If Construe returns a result with confidence ≥ 0.90, auto-apply the code; otherwise flag for provider review
+- [ ] Build a standalone coding utility for batch coding of imported data:
+  - Input: list of Condition resources with free-text `Condition.code.text` but no structured codes
+  - Output: each Condition enriched with ICD-10-CM and/or SNOMED codes from Construe
+
+#### 4d. Agent API — clinical workflows
+- [ ] **Intake automation bot** (`patient-onboarding`): When a new Patient is created with attached intake documents (questionnaires, prior records), run the PhenoML Agent to:
+  1. Extract demographics, problem list, medication list, allergies from the documents
+  2. Create corresponding FHIR resources (Condition, MedicationRequest, AllergyIntolerance)
+  3. Flag any items that need provider confirmation (low confidence or ambiguous)
+- [ ] **Referral processor**: Accept a scanned/faxed referral letter (DocumentReference with PDF), run PhenoML Agent to extract referring provider, reason for referral, urgency → create a ServiceRequest resource
+
+#### 4e. Document processing pipeline
+This handles the full lifecycle of clinical documents arriving as PDFs or faxes:
+- [ ] Accept inbound documents via:
+  - Direct upload (FHIR `DocumentReference` with `content.attachment.data` base64)
+  - Fax-to-email integration (future — stub the email-to-DocumentReference ingestion)
+- [ ] OCR / text extraction: If PhenoML Agent handles raw PDFs, send directly; otherwise integrate a pre-processing step (e.g., extract text with `pdf-parse` before sending to PhenoML)
+- [ ] Chain: Document arrives → `document-processor` bot → PhenoML Agent → FHIR resources created → linked back to source DocumentReference via `Provenance` resource
+
+#### 4f. Testing
+- [ ] Unit tests with mocked PhenoML API responses (sample Lang2FHIR output, sample Construe codes)
+- [ ] Integration tests with live PhenoML API using known clinical text:
+  - "Type 2 diabetes mellitus" should return ICD-10 E11.9
+  - "Metformin 500mg" should return RxNorm 860975
+  - "Patient with penicillin allergy" should produce an AllergyIntolerance resource
+
+---
+
+### Phase 5: Portal Features & Hardening (Weeks 8–12)
+
+**Goal:** Patient- and provider-facing portal features, notification delivery, and production readiness.
+
+> Depends on Phases 2–4 being substantially complete.
+
+#### 5a. Patient-facing API layer
+Medplum already exposes the FHIR R4 API. This phase configures it for patient self-service:
+- [ ] Verify access policies enforce patient compartment scoping (patient can only access resources where they are the subject)
+- [ ] Create a SMART on FHIR app registration for the patient portal frontend (authorization code flow + PKCE)
+- [ ] Implement a thin API proxy (or Medplum Bot) for patient-specific operations not covered by raw FHIR:
+  - **My health summary**: Aggregate the patient's active Conditions, current MedicationRequests, recent Observations, and upcoming Appointments into a single response (FHIR `$everything` operation or custom Bundle)
+  - **Download my records**: Generate a C-CDA or FHIR Bundle export of the patient's complete record
+
+#### 5b. Appointment scheduling
+- [ ] Populate `Schedule` and `Slot` resources for each Practitioner (based on configurable office hours)
+- [ ] Build a booking flow: patient queries available Slots → selects one → creates Appointment (status=proposed) → bot notifies provider → provider confirms (status=booked)
+- [ ] Handle cancellation: patient updates Appointment status=cancelled → bot sends cancellation to external EMR (if synced) and HL7 SIU^S15 to downstream systems
+
+#### 5c. Secure messaging
+- [ ] Patient creates a `Communication` resource (sender=Patient, recipient=Practitioner, payload=text)
+- [ ] Subscription triggers notification to provider (see 5d)
+- [ ] Provider replies by creating a `Communication` with `inResponseTo` reference
+- [ ] Access policy ensures patients can only see Communications where they are sender or recipient
+
+#### 5d. Notifications (SMS / email)
+- [ ] Integrate a notification delivery service (AWS SES for email, AWS SNS or Twilio for SMS)
+- [ ] Build a `notification-sender` bot triggered by:
+  - New Communication → email/SMS to recipient
+  - Appointment reminder (cron: daily) → SMS/email for appointments in the next 24–48 hours
+  - Critical lab result → SMS to provider
+- [ ] Store notification preferences on the Patient resource (extension or linked Communication preferences)
+
+#### 5e. Consent management
+- [ ] When a patient creates or updates a `Consent` resource (e.g., opts out of data sharing with a specific EMR), the `consent-enforcer` bot updates the corresponding Medplum access policy to block that data flow
+- [ ] Support granular consent: per-resource-type opt-in/opt-out (e.g., share labs but not mental health records)
+- [ ] Audit all consent changes via AuditEvent
+
+#### 5f. Audit & compliance
+- [ ] Verify that every FHIR API request generates an `AuditEvent` (Medplum does this by default — confirm it covers all access paths including Bot-initiated reads)
+- [ ] Build an audit dashboard query: list all access to a specific Patient's data in the last 30 days (for patient "accounting of disclosures" requests per HIPAA)
+- [ ] Review and harden all access policies — ensure no over-permissive rules
+- [ ] Verify TLS is enforced on all external connections (FHIR APIs, HL7 v2, PhenoML)
+
+#### 5g. Performance & load testing
+- [ ] Load test the Medplum FHIR API: target 100 concurrent patient sessions, 50 req/sec sustained
+- [ ] Load test the HL7 v2 listener: target 10 messages/sec sustained
+- [ ] Profile EMR sync bots: ensure a full sync cycle completes within the 15-minute cron window
+- [ ] Identify and index any slow FHIR search queries (custom SearchParameter resources if needed)
 
 ---
 
@@ -524,14 +771,18 @@ health-portal/
 
 ```json
 {
-  "@medplum/core": "latest",
-  "@medplum/fhirtypes": "latest",
-  "node-hl7-client": "latest",
-  "node-hl7-server": "latest"
+  "@medplum/core": "^3.2.0",
+  "@medplum/fhirtypes": "^3.2.0",
+  "node-hl7-client": "^2.3.0",
+  "node-hl7-server": "^2.3.0"
 }
 ```
 
 PhenoML is accessed via REST API (API key auth at `https://api.pheno.ml`).
+
+**Dev dependencies** (root `package.json`): TypeScript ^5.3, Jest, ESLint, ts-node.
+
+**Version policy:** Pin major versions in `package.json` using `^` ranges. Run `npm audit` weekly and update patch/minor versions. Major upgrades require a dedicated PR with test verification.
 
 ---
 
