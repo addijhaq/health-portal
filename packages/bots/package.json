@@ -1,0 +1,18 @@
+{
+  "name": "@health-portal/bots",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@health-portal/core": "*",
+    "@health-portal/phenoml": "*",
+    "@health-portal/emr-connectors": "*",
+    "@medplum/core": "^3.2.0",
+    "@medplum/fhirtypes": "^3.2.0"
+  }
+}

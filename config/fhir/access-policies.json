@@ -1,0 +1,47 @@
+{
+  "policies": [
+    {
+      "name": "Patient Portal Access",
+      "description": "Patients can read/write their own data and related resources",
+      "compartment": {
+        "reference": "%patient"
+      },
+      "resource": [
+        { "resourceType": "Patient", "readonly": true },
+        { "resourceType": "Observation", "readonly": true },
+        { "resourceType": "Condition", "readonly": true },
+        { "resourceType": "MedicationRequest", "readonly": true },
+        { "resourceType": "AllergyIntolerance", "readonly": true },
+        { "resourceType": "Immunization", "readonly": true },
+        { "resourceType": "DiagnosticReport", "readonly": true },
+        { "resourceType": "DocumentReference", "readonly": true },
+        { "resourceType": "Encounter", "readonly": true },
+        { "resourceType": "Appointment" },
+        { "resourceType": "Communication" },
+        { "resourceType": "Consent" },
+        { "resourceType": "Coverage", "readonly": true }
+      ]
+    },
+    {
+      "name": "Provider Access",
+      "description": "Providers can read/write clinical resources for assigned patients",
+      "resource": [
+        { "resourceType": "Patient" },
+        { "resourceType": "Encounter" },
+        { "resourceType": "Observation" },
+        { "resourceType": "Condition" },
+        { "resourceType": "MedicationRequest" },
+        { "resourceType": "AllergyIntolerance" },
+        { "resourceType": "Immunization" },
+        { "resourceType": "DiagnosticReport" },
+        { "resourceType": "DocumentReference" },
+        { "resourceType": "Appointment" },
+        { "resourceType": "Schedule" },
+        { "resourceType": "Slot" },
+        { "resourceType": "Communication" },
+        { "resourceType": "ServiceRequest" },
+        { "resourceType": "Consent", "readonly": true }
+      ]
+    }
+  ]
+}

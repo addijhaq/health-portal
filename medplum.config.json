@@ -1,0 +1,52 @@
+{
+  "bots": [
+    {
+      "name": "patient-onboarding",
+      "id": "",
+      "source": "packages/bots/src/clinical/patient-onboarding.ts",
+      "dist": "packages/bots/dist/clinical/patient-onboarding.js"
+    },
+    {
+      "name": "lab-result-processor",
+      "id": "",
+      "source": "packages/bots/src/clinical/lab-result-processor.ts",
+      "dist": "packages/bots/dist/clinical/lab-result-processor.js"
+    },
+    {
+      "name": "epic-sync",
+      "id": "",
+      "source": "packages/bots/src/emr-sync/epic-sync.ts",
+      "dist": "packages/bots/dist/emr-sync/epic-sync.js"
+    },
+    {
+      "name": "cerner-sync",
+      "id": "",
+      "source": "packages/bots/src/emr-sync/cerner-sync.ts",
+      "dist": "packages/bots/dist/emr-sync/cerner-sync.js"
+    },
+    {
+      "name": "athena-sync",
+      "id": "",
+      "source": "packages/bots/src/emr-sync/athena-sync.ts",
+      "dist": "packages/bots/dist/emr-sync/athena-sync.js"
+    },
+    {
+      "name": "adt-handler",
+      "id": "",
+      "source": "packages/bots/src/hl7-handlers/adt-handler.ts",
+      "dist": "packages/bots/dist/hl7-handlers/adt-handler.js"
+    },
+    {
+      "name": "oru-handler",
+      "id": "",
+      "source": "packages/bots/src/hl7-handlers/oru-handler.ts",
+      "dist": "packages/bots/dist/hl7-handlers/oru-handler.js"
+    },
+    {
+      "name": "siu-handler",
+      "id": "",
+      "source": "packages/bots/src/hl7-handlers/siu-handler.ts",
+      "dist": "packages/bots/dist/hl7-handlers/siu-handler.js"
+    }
+  ]
+}

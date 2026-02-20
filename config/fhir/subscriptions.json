@@ -1,0 +1,34 @@
+{
+  "subscriptions": [
+    {
+      "name": "patient-onboarding",
+      "criteria": "Patient",
+      "reason": "Trigger patient onboarding bot when new patients are created",
+      "botName": "patient-onboarding"
+    },
+    {
+      "name": "lab-result-processor",
+      "criteria": "Observation?category=laboratory",
+      "reason": "Process new lab results for coding validation and critical value alerts",
+      "botName": "lab-result-processor"
+    },
+    {
+      "name": "epic-sync-trigger",
+      "criteria": "Patient,Encounter,Observation,Condition,MedicationRequest",
+      "reason": "Trigger Epic sync when clinical resources are modified locally",
+      "botName": "epic-sync"
+    },
+    {
+      "name": "cerner-sync-trigger",
+      "criteria": "Patient,Encounter,Observation,Condition,MedicationRequest",
+      "reason": "Trigger Cerner sync when clinical resources are modified locally",
+      "botName": "cerner-sync"
+    },
+    {
+      "name": "athena-sync-trigger",
+      "criteria": "Patient,Encounter,Observation,Condition,MedicationRequest",
+      "reason": "Trigger Athena sync when clinical resources are modified locally",
+      "botName": "athena-sync"
+    }
+  ]
+}

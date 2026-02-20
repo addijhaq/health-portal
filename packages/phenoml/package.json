@@ -1,0 +1,16 @@
+{
+  "name": "@health-portal/phenoml",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@health-portal/core": "*",
+    "@medplum/core": "^3.2.0",
+    "@medplum/fhirtypes": "^3.2.0"
+  }
+}

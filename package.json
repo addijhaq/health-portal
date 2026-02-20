@@ -1,0 +1,26 @@
+{
+  "name": "health-portal",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Patient portal backend for private medical practice — Medplum + PhenoML",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "eslint 'packages/*/src/**/*.ts'",
+    "clean": "rm -rf packages/*/dist",
+    "deploy:bots": "ts-node scripts/deploy-bots.ts",
+    "seed": "ts-node scripts/seed-data.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "eslint": "^8.56.0",
+    "typescript": "^5.3.3",
+    "ts-node": "^10.9.2"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

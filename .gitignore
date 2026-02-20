@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+*.js.map
+*.d.ts.map
+coverage/
+.medplum/
+*.pem
+*.key
