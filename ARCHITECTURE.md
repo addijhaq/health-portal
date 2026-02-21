@@ -655,27 +655,231 @@ The base connector class (`base-connector.ts`) is already scaffolded with `authe
   - `buildSyncAuditEvent(result: SyncResult)`: Create AuditEvent with sync stats
 - [ ] **Import flow** (external EMR → Medplum):
   1. Call `connector.pullChanges(since, resourceTypes)` to get a Bundle of updated resources
-  2. For each resource, run patient matching to find/create the local Patient
-  3. Remap identifiers and references to local IDs
-  4. POST the transaction Bundle to Medplum
+  2. Sort resources by the tiered dependency order defined in **3e Step 1** (Organization/Practitioner first, then Patient, then Encounter, then clinical resources)
+  3. For each Patient resource, run patient matching (3c) to find/create the local Patient
+  4. Remap all identifiers and references to local Medplum IDs using the remapping pipeline defined in **3e**
+  5. POST the transaction Bundle to Medplum
+  6. Create `Provenance` resources linking each imported resource to its vendor origin
 - [ ] **Export flow** (Medplum → external EMR):
   1. Subscriptions are already defined in `config/fhir/subscriptions.json` (`epic-sync-trigger`, `cerner-sync-trigger`, `athena-sync-trigger`) — these fire on changes to Patient, Encounter, Observation, Condition, MedicationRequest
   2. When triggered, the sync bot maps the local resource to the vendor's expected format using the vendor mapping functions
-  3. Call `connector.write()` to push to the external EMR
-  4. Log the export result via `buildSyncAuditEvent()`
+  3. Reverse-remap all Medplum references back to vendor IDs using **3e Step 5** (`reverseRemapReferences()`)
+  4. Call `connector.write()` to push to the external EMR
+  5. Log the export result via `buildSyncAuditEvent()`
 - [ ] **Conflict resolution strategy:**
   - Last-writer-wins by default (use `Resource.meta.lastUpdated` comparison)
   - For specific resource types (MedicationRequest, AllergyIntolerance), flag conflicts for provider review instead of auto-merging — create a `DetectedIssue` resource
   - Never auto-resolve conflicts on `Patient` demographics — always flag for review
 
-#### 3e. Bulk import
+#### 3e. Identifier Remapping (Cross-Vendor Reference Resolution)
+
+**Problem statement:** Each vendor's FHIR server assigns its own internal `id` to every resource. When an Observation on Cerner says `"subject": { "reference": "Patient/12724066" }`, that ID only exists on Cerner's server. After import into Medplum, that Patient receives a new Medplum-assigned `id`, so every reference in every imported resource must be rewritten to point at the Medplum ID. This applies identically to Epic and athenahealth — each vendor's internal IDs are opaque and meaningless outside their own server.
+
+##### Overview of the remapping pipeline
+
+```
+External EMR                    Mapping Table                 Medplum CDR
+─────────────                   ─────────────                 ──────────────
+Patient/12724066  ──import──►  (cerner, Patient, 12724066)   Patient/abc-def-123
+                                       │
+Observation.subject               lookup│
+  = Patient/12724066  ──────────────────┘──►  Observation.subject
+                                                = Patient/abc-def-123
+```
+
+##### Step 1 — Import anchor resources and build the ID mapping table
+
+Import resources in dependency order. For each resource imported into Medplum, record the mapping `(vendor, resourceType, vendorId) → medplumId`.
+
+**Import order** (each tier depends only on resources from prior tiers):
+
+| Tier | Resource types | Why this order |
+|---|---|---|
+| 1 | Organization, Practitioner, PractitionerRole | No patient references; referenced by everything else |
+| 2 | Patient | Build the core identity map; all clinical resources reference Patient |
+| 3 | Encounter | References Patient + Practitioner |
+| 4 | Condition, AllergyIntolerance, Immunization | Reference Patient + Encounter |
+| 5 | Observation, DiagnosticReport | Reference Patient + Encounter; DiagnosticReport.result references Observations |
+| 6 | MedicationRequest, DocumentReference, Coverage | Reference Patient + Encounter + Practitioner |
+
+**The mapping table** is stored as a Medplum `Parameters` resource per vendor (alongside the existing sync timestamp), keyed by `(resourceType, vendorId)`:
+
+```json
+{
+  "resourceType": "Parameters",
+  "id": "id-map-cerner",
+  "parameter": [
+    {
+      "name": "mapping",
+      "part": [
+        { "name": "vendorResourceType", "valueString": "Patient" },
+        { "name": "vendorId", "valueString": "12724066" },
+        { "name": "medplumId", "valueString": "abc-def-123" }
+      ]
+    }
+  ]
+}
+```
+
+For performance during bulk import, the sync bot should also maintain an in-memory `Map<string, string>` keyed by `${vendor}:${resourceType}:${vendorId}` — matching the key format used in the rewrite algorithm (Step 3). The existing `resourceHash()` utility in `packages/core/src/utils/index.ts` serves a different purpose (deduplication by business identifier) and should not be conflated with this map.
+
+**Scalability note:** The `Parameters` resource will grow with each new mapping. For deployments syncing >10,000 resources per vendor, consider migrating the mapping table to a dedicated Medplum `Binary` resource (NDJSON format) or an external key-value store. For initial implementation, the `Parameters` approach is sufficient and keeps everything within the FHIR data model.
+
+##### Step 2 — Preserve the vendor identifier on imported resources
+
+When creating a Patient in Medplum, preserve the vendor's identifier in the `Patient.identifier` array. This enables future reverse lookups (given a vendor ID, find the Medplum Patient) and supports bidirectional sync.
+
+```json
+{
+  "resourceType": "Patient",
+  "identifier": [
+    {
+      "system": "http://health-portal.local/mrn",
+      "value": "LOCAL-001",
+      "use": "usual",
+      "type": { "coding": [{ "system": "http://terminology.hl7.org/CodeSystem/v2-0203", "code": "MR" }] }
+    },
+    {
+      "system": "<vendor-identifier-system>",
+      "value": "<vendor-id>",
+      "use": "secondary",
+      "type": { "coding": [{ "system": "http://terminology.hl7.org/CodeSystem/v2-0203", "code": "MR" }] }
+    }
+  ]
+}
+```
+
+This also means the Medplum Patient can be looked up by vendor identifier: `GET /Patient?identifier=<vendor-system>|<vendor-id>`.
+
+##### Step 3 — Rewrite references in all non-anchor resources
+
+Every imported resource that references another resource must have its reference fields rewritten from vendor IDs to Medplum IDs. The reference fields to scan per resource type:
+
+| Resource | Reference fields requiring remapping |
+|---|---|
+| Observation | `subject`, `encounter`, `performer[]` |
+| Condition | `subject`, `encounter`, `recorder`, `asserter` |
+| Encounter | `subject`, `participant[].individual`, `serviceProvider` |
+| MedicationRequest | `subject`, `encounter`, `requester`, `performer` |
+| AllergyIntolerance | `patient`, `recorder`, `asserter`, `encounter` |
+| DiagnosticReport | `subject`, `encounter`, `performer[]`, `result[]` |
+| Immunization | `patient`, `encounter`, `performer[].actor` |
+| DocumentReference | `subject`, `author[]`, `context.encounter[]` |
+| Coverage | `beneficiary`, `payor[]` |
+
+**Rewrite algorithm** (to be implemented in `sync-utils.ts`):
+
+```
+function remapReferences(resource, idMap, vendor):
+  for each reference field in resource:
+    if field.reference matches "ResourceType/vendorId":
+      extract (resourceType, vendorId) from the reference string
+      key = `${vendor}:${resourceType}:${vendorId}`
+      medplumId = idMap.get(key)
+      if medplumId exists:
+        field.reference = "ResourceType/medplumId"
+      else if field.reference starts with "#":
+        skip — this is a contained resource fragment reference
+      else:
+        log warning — unresolved reference
+        create a DetectedIssue resource for manual review
+  return resource
+```
+
+**Note on `resourceHash()` vs the ID map key:** The existing `resourceHash(resourceType, identifierSystem, identifierValue)` utility in `packages/core/src/utils/index.ts` is designed for deduplication using business identifiers (e.g., MRN). The ID mapping table uses a different key — `vendor:resourceType:vendorFhirId` — because FHIR references use the server-assigned `.id`, not business identifiers. Both utilities are needed: `resourceHash` for dedup, and the vendor-keyed map for reference rewriting.
+
+**Handling `contained` resources:** Some vendors (particularly Cerner) embed resources inside the parent resource using `contained[]` with `#fragment` references. These do NOT require remapping — the contained resource travels with its parent and the `#` reference is resolved locally within the resource itself.
+
+##### Step 4 — Vendor-specific identifier system configuration
+
+The OIDs in `packages/core/src/constants/index.ts` (`EPIC_FHIR_ID`, `CERNER_FHIR_ID`, `ATHENA_FHIR_ID`) are sandbox/default values. In production, each vendor's OID varies per organization. The remapping logic must use environment-configurable OIDs.
+
+- [ ] Add to `.env.example`:
+  ```env
+  # Vendor FHIR identifier systems (OIDs vary per organization — discover from vendor /Patient responses)
+  EPIC_FHIR_ID_SYSTEM=urn:oid:1.2.840.114350.1.13.0.1.7.5.737384.0
+  CERNER_FHIR_ID_SYSTEM=urn:oid:2.16.840.1.113883.6.1000
+  ATHENA_FHIR_ID_SYSTEM=urn:oid:2.16.840.1.113883.3.666.5.2
+  ```
+- [ ] Update `IDENTIFIER_SYSTEMS` in `constants/index.ts` to read from `process.env` with the current hardcoded values as fallback defaults
+- [ ] Implement OID auto-discovery: on first sync, read a sample `Patient` response from the vendor, extract the `identifier[].system` values, and log them so the operator can confirm the correct OID for their organization
+
+##### Vendor-specific remapping considerations
+
+**Cerner / Oracle Health:**
+- Cerner's generic OID `2.16.840.1.113883.6.1000` is a Millennium platform-level system; each site may register its own OID. Discover the actual OID from the first `Patient` response's `identifier[].system` values during Phase 3a sandbox verification.
+- Cerner supports **CMRN** (Community MRN) for multi-facility organizations. If `identifier[].type.coding[].code = "CMRN"` is present, prefer it as the cross-facility matching key because it is stable across Cerner facility boundaries.
+- Cerner may return **contained resources** (embedded inside the parent with `#fragment` references). Skip remapping for these — they are self-contained.
+- Cerner returns numeric IDs (e.g., `Patient/12724066`).
+
+**Epic:**
+- Epic uses **opaque FHIR ID tokens** (e.g., `Patient/TnOZ.elPXC...`), not numeric IDs. The remapping logic must handle arbitrary string IDs, not just integers.
+- Epic's OID varies per organization. The sandbox OID (`1.2.840.114350.1.13.0.1.7.5.737384.0`) will differ in production. Treat it as a per-deployment config value.
+- Epic returns multiple identifiers per Patient with `type.text` distinguishing them: `"FHIR"` for the FHIR-assigned ID, `"MRN"` for the medical record number, and others. Use the `type.text = "MRN"` identifier for cross-system matching; use the `type.text = "FHIR"` identifier for the vendor ID mapping table.
+- Epic may include **proprietary code systems** in `CodeableConcept.coding[]` arrays alongside SNOMED/ICD-10/LOINC. During import, preserve the standard codes and either strip proprietary codes or store them in an extension, depending on the mapping configuration.
+
+**athenahealth:**
+- athenahealth has **narrower FHIR R4 coverage** than Epic/Cerner. Run `GET /metadata` during Phase 3a to check the `CapabilityStatement` and document which resource types are available. Resources not available via FHIR R4 may require fallback to athena's proprietary REST API.
+- athena adds **vendor-specific extensions** (e.g., `athena-subscription-extension-owner`, `athena-coverage-extension-coverage-type`). Strip these on import unless the data is needed — in which case, map them to local Extension resources or custom fields.
+- athena's identifier system URI may vary by practice. Same approach as Epic/Cerner: discover the actual system from the first Patient response, configure via environment variable.
+- athena uses the HL7 v2 identifier type code `"MR"` for MRN but may present identifier search in a non-standard format (`identifier:otype=http://terminology.hl7.org/CodeSystem/v2-0203|MR|<value>`). The connector's `searchPatient()` method must account for this.
+
+##### Step 5 — Reverse remapping for export (Medplum → vendor)
+
+When the export flow (3d) pushes a local Medplum resource to an external EMR, references must be rewritten in the opposite direction: Medplum IDs back to the vendor's IDs. The same ID mapping table is used, but the lookup is reversed: `medplumId → (vendor, resourceType, vendorId)`.
+
+- [ ] Add `reverseRemapReferences()` to `sync-utils.ts` — same traversal as `remapReferences()`, but looks up Medplum IDs in a reverse index built from the mapping table
+- [ ] The reverse index is built once from `loadIdMap()` by inverting `vendorId → medplumId` to `medplumId → vendorId`
+- [ ] If a Medplum resource references another resource that has never been synced to the target vendor (no mapping entry exists), skip that reference and log it — the referenced resource may need to be exported first
+
+##### Step 6 — Provenance tracking
+
+Every resource imported through the remapping pipeline should have a corresponding `Provenance` resource created in Medplum, recording:
+- `Provenance.target` → the imported resource
+- `Provenance.agent.who` → the vendor system (Organization reference or identifier)
+- `Provenance.entity[].what` → the original vendor resource reference (e.g., `Patient/12724066` on Cerner)
+- `Provenance.recorded` → the import timestamp
+
+This enables audit queries like "where did this Observation originally come from?" and supports the USCDI Provenance requirement.
+
+##### Implementation checklist
+
+- [ ] Add `IdMappingEntry` type to `packages/core/src/types/index.ts`:
+  ```typescript
+  interface IdMappingEntry {
+    vendor: EmrVendor;
+    vendorResourceType: string;
+    vendorId: string;
+    medplumId: string;
+    vendorIdentifierSystem: string;
+    vendorIdentifierValue?: string;
+  }
+  ```
+- [ ] Add `remapReferences()` function to `packages/bots/src/emr-sync/sync-utils.ts`
+- [ ] Add `buildIdMap()` function to `sync-utils.ts` — builds an in-memory Map from a batch of imported resources
+- [ ] Add `persistIdMap()` and `loadIdMap()` to `sync-utils.ts` — read/write the `Parameters` resource in Medplum
+- [ ] Add `discoverIdentifierSystem()` to each vendor's `*-mappings.ts` — reads a sample Patient from the vendor and extracts the identifier system OID
+- [ ] Add vendor identifier system env vars to `.env.example`
+- [ ] Add `preserveVendorIdentifier()` to `sync-utils.ts` — injects the vendor identifier into the imported Patient's `identifier[]` array
+- [ ] Add `reverseRemapReferences()` to `sync-utils.ts` — reverse ID lookup for export flow
+- [ ] Add `createImportProvenance()` to `sync-utils.ts` — creates a `Provenance` resource for each imported resource
+- [ ] Unit tests: given a mock vendor Bundle with internal vendor references, verify all references are correctly rewritten to Medplum IDs after remapping
+- [ ] Unit tests: given a Medplum resource with local IDs, verify reverse remapping produces correct vendor references for export
+- [ ] Integration tests: import a Patient + linked Observations from each vendor sandbox, verify `Observation.subject` points to the correct Medplum Patient ID
+
+---
+
+#### 3f. Bulk import
 - [ ] Implement `bulkExport()` for Epic and Cerner using FHIR Bulk Data Access IG:
   1. POST to `/$export` or `/Group/{id}/$export` with `_type` parameter
   2. Poll the status endpoint until `200 OK` with output URLs
   3. Download NDJSON files from output URLs
-  4. Parse and import line-by-line into Medplum
+  4. Sort resources by the tiered dependency order from **3e Step 1**
+  5. Run each resource through the full remapping pipeline (**3e Steps 1–3**): build ID map, preserve vendor identifiers, rewrite references
+  6. POST transaction Bundles to Medplum in batches (100 resources per Bundle to avoid request size limits)
+  7. Create `Provenance` resources per **3e Step 6**
 
-#### 3f. Testing
+#### 3g. Testing
 - [ ] Unit tests for each auth flow (mock HTTP responses from vendor token endpoints)
 - [ ] Unit tests for vendor mapping functions (sample vendor FHIR resources → normalized local format)
 - [ ] Integration tests against vendor sandboxes (Epic sandbox, Cerner open sandbox) — these are slow and should be tagged for CI-only execution
