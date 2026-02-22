@@ -13,7 +13,7 @@ export class PhenoMlClient {
     this.apiKey = config.apiKey;
   }
 
-  async request<T>(path: string, body: Record<string, unknown>): Promise<T> {
+  async request<T>(path: string, body: object): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'POST',
       headers: {

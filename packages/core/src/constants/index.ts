@@ -5,10 +5,10 @@ export const IDENTIFIER_SYSTEMS = {
   MRN: 'http://health-portal.local/mrn',
   SSN: 'http://hl7.org/fhir/sid/us-ssn',
   NPI: 'http://hl7.org/fhir/sid/us-npi',
-  EPIC_FHIR_ID: 'urn:oid:1.2.840.114350.1.13.0.1.7.5.737384.0',
-  CERNER_FHIR_ID: 'urn:oid:2.16.840.1.113883.6.1000',
-  ATHENA_FHIR_ID: 'urn:oid:2.16.840.1.113883.3.666.5.2',
-} as const;
+  EPIC_FHIR_ID: process.env.EPIC_FHIR_ID_SYSTEM ?? 'urn:oid:1.2.840.114350.1.13.0.1.7.5.737384.0',
+  CERNER_FHIR_ID: process.env.CERNER_FHIR_ID_SYSTEM ?? 'urn:oid:2.16.840.1.113883.6.1000',
+  ATHENA_FHIR_ID: process.env.ATHENA_FHIR_ID_SYSTEM ?? 'urn:oid:2.16.840.1.113883.3.666.5.2',
+};
 
 /**
  * Code systems used for clinical coding.

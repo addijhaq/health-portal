@@ -73,4 +73,19 @@ export interface PatientMatchCriteria {
   mrnSystem?: string;
 }
 
+/**
+ * Entry in the vendor-to-Medplum identifier mapping table.
+ * Used by the sync engine to rewrite FHIR references between systems.
+ *
+ * Key format: `${vendor}:${vendorResourceType}:${vendorId}`
+ */
+export interface IdMappingEntry {
+  vendor: EmrVendor;
+  vendorResourceType: string;
+  vendorId: string;
+  medplumId: string;
+  vendorIdentifierSystem: string;
+  vendorIdentifierValue?: string;
+}
+
 export type { Patient, Practitioner, Organization };

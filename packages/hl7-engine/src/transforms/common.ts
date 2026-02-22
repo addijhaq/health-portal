@@ -64,7 +64,7 @@ function parsePhone(phoneField: string): ContactPoint {
   };
 }
 
-function mapGender(hl7Gender?: string): Patient['gender'] {
+export function mapGender(hl7Gender?: string): Patient['gender'] {
   switch (hl7Gender?.toUpperCase()) {
     case 'M': return 'male';
     case 'F': return 'female';
@@ -73,7 +73,7 @@ function mapGender(hl7Gender?: string): Patient['gender'] {
   }
 }
 
-function parseHl7Date(dateField?: string): string | undefined {
+export function parseHl7Date(dateField?: string): string | undefined {
   if (!dateField || dateField.length < 8) return undefined;
   return `${dateField.slice(0, 4)}-${dateField.slice(4, 6)}-${dateField.slice(6, 8)}`;
 }

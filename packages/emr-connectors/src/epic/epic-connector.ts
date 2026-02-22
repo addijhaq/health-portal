@@ -1,6 +1,7 @@
 import type { Bundle, Patient, Resource } from '@medplum/fhirtypes';
 import type { EmrConnectionConfig } from '@health-portal/core';
 import { BaseEmrConnector } from '../base-connector';
+import { authenticateEpic } from './epic-auth';
 
 /**
  * Epic FHIR R4 connector.
@@ -15,12 +16,9 @@ export class EpicConnector extends BaseEmrConnector {
   }
 
   async authenticate(): Promise<void> {
-    // Epic backend services use JWT assertion:
-    // 1. Build JWT with client_id as iss, token endpoint as aud
-    // 2. Sign with RS384 using private key
-    // 3. POST to token endpoint with grant_type=client_credentials
-    // 4. Store access_token and compute expiry
-    throw new Error('Epic auth not yet implemented');
+    const result = await authenticateEpic(this.config);
+    this.accessToken = result.accessToken;
+    this.tokenExpiry = result.expiresAt;
   }
 
   async searchPatient(params: Record<string, string>): Promise<Bundle<Patient>> {
