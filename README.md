@@ -39,12 +39,14 @@ health-portal/
 │   ├── deploy-bots.ts           # Register and deploy bots to Medplum
 │   ├── setup-subscriptions.ts   # Create AccessPolicy + Subscription resources
 │   └── seed-data.ts             # Create synthetic FHIR test data (49 resources)
+├── tests/
+│   └── fixtures/                # HL7 v2 sample messages (ADT, ORU, SIU)
 └── packages/
     ├── core/                    # Shared types, constants, utilities
     ├── hl7-engine/              # HL7 v2 MLLP server, router, client, transforms
     ├── emr-connectors/          # Epic, Cerner, athena FHIR connectors
-    ├── phenoml/                 # PhenoML API client (Lang2FHIR, Construe, Agents)
-    └── bots/                    # Medplum bot handlers (clinical, EMR sync, HL7)
+    ├── phenoml/                 # PhenoML API client (Lang2FHIR, Construe, Agents, Workflows)
+    └── bots/                    # Medplum bot handlers (clinical, EMR sync, HL7, admin)
 ```
 
 ## Quick Start
@@ -106,6 +108,9 @@ cp .env.example .env
 | `HL7_LISTEN_PORT` | HL7 v2 MLLP listener port (default: `2575`) |
 | `HL7_TLS_CERT_PATH` | TLS certificate for HL7 server |
 | `HL7_TLS_KEY_PATH` | TLS private key for HL7 server |
+| `EPIC_FHIR_ID_SYSTEM` | Epic FHIR identifier system OID (varies per organization) |
+| `CERNER_FHIR_ID_SYSTEM` | Cerner FHIR identifier system OID (varies per site) |
+| `ATHENA_FHIR_ID_SYSTEM` | athenahealth FHIR identifier system OID (varies per practice) |
 
 ## Building
 
@@ -166,9 +171,19 @@ npx jest --showConfig
 |---------|-----------|-------|----------------|
 | `core` | `core.smoke.test.ts` | 14 | Constants (LOINC/ICD-10/SNOMED URIs), utility functions (`extractMatchCriteria`, `toHl7Timestamp`/`fromHl7Timestamp` round-trip), type compilation |
 | `hl7-engine` | `hl7-engine.smoke.test.ts` | 9 | `Hl7Router` routing, `Hl7Server`/`Hl7Client` instantiation, `pidToPatient` PID→FHIR Patient mapping |
+| `hl7-engine` | `adt-transform.test.ts` | 9 | ADT A01/A03/A04 → Patient, Encounter, Condition, Coverage, RelatedPerson with origin tags |
+| `hl7-engine` | `oru-transform.test.ts` | 8 | ORU R01 → DiagnosticReport + Observations, OBX value types (NM/ST/CE), unmatched patient handling |
+| `hl7-engine` | `siu-transform.test.ts` | 5 | SIU S12/S15 → Appointment booking/cancellation with participant references |
+| `hl7-engine` | `orm-transform.test.ts` | 14 | Outbound ORM^O01, ADT^A04, RDE^O11 message construction from FHIR resources |
+| `hl7-engine` | `server.test.ts` | 4 | Server start/stop lifecycle, port configuration |
+| `hl7-engine` | `client.test.ts` | 2 | Client instantiation, send failure handling |
 | `emr-connectors` | `emr-connectors.smoke.test.ts` | 9 | All 3 connectors instantiate as `BaseEmrConnector` subclasses with correct vendor property |
+| `emr-connectors` | `epic-mappings.test.ts` | 10 | Epic extension stripping, opaque ID handling, MRN/FHIR identifier mapping, OID discovery |
+| `emr-connectors` | `cerner-mappings.test.ts` | 6 | CMRN preference, contained resource handling, numeric ID mapping |
+| `emr-connectors` | `athena-mappings.test.ts` | 6 | Vendor extension stripping, identifier normalization |
 | `phenoml` | `phenoml.smoke.test.ts` | 8 | `PhenoMlClient`, `Lang2FhirService`, `ConstructService`, `AgentService` instantiation |
-| `bots` | `bots.smoke.test.ts` | 9 | All 8 exported bot handler functions exist |
+| `bots` | `bots.smoke.test.ts` | 10 | All 11 exported bot handler functions exist |
+| `bots` | `sync-utils.test.ts` | 27 | ID mapping (build/persist/load), reference remapping, reverse remapping, vendor identifier preservation, dependency tier sorting, deterministic/probabilistic MPI matching, ambiguous match flagging |
 
 ### Adding New Tests
 
@@ -297,26 +312,39 @@ All medical codes are real and verifiable (e.g., LOINC `4548-4` = HbA1c, ICD-10 
 Shared foundation used by all other packages.
 
 - **Constants**: `IDENTIFIER_SYSTEMS` (MRN, NPI, SSN, Epic/Cerner/Athena FHIR IDs), `CODE_SYSTEMS` (ICD-10-CM, SNOMED, LOINC, RxNorm, CPT, CVX), `HL7_DEFAULTS`, `HL7_MESSAGE_TYPES`, `PHENOML_VOCABULARIES`
-- **Types**: `EmrVendor`, `EmrConnectionConfig`, `SyncResult`, `Hl7MessageMeta`, `PhenoMlConfig`, `PatientMatchCriteria`
+- **Types**: `EmrVendor`, `EmrConnectionConfig`, `SyncResult`, `Hl7MessageMeta`, `PhenoMlConfig`, `PatientMatchCriteria`, `IdMappingEntry`
 - **Utilities**: `extractMatchCriteria()`, `resourceHash()`, `toHl7Timestamp()`, `fromHl7Timestamp()`
 
 ### `@health-portal/hl7-engine`
 
 HL7 v2 interface engine for inbound/outbound messaging via MLLP protocol.
 
-- **`Hl7Server`**: TCP listener for inbound HL7 v2 messages (uses `node-hl7-server`)
+- **`Hl7Server`**: MLLP listener for inbound HL7 v2 messages with ACK/NAK responses and optional TLS (uses `node-hl7-server`)
 - **`Hl7Router`**: Routes messages by type+event (e.g., `ADT^A01`) to registered handlers
-- **`Hl7Client`**: TCP client for outbound HL7 v2 messages (uses `node-hl7-client`)
-- **`pidToPatient()`**: Maps HL7 PID segment fields to FHIR Patient resource
+- **`Hl7Client`**: MLLP client for outbound HL7 v2 messages with retry and exponential backoff (uses `node-hl7-client`)
+- **Inbound Transforms** (HL7 v2 → FHIR R4):
+  - `transformAdt()` — ADT A01/A03/A04/A08 → Patient, Encounter, Condition, Coverage, RelatedPerson
+  - `transformOru()` — ORU R01 → DiagnosticReport + Observations (NM/ST/CE value types, unmatched patient handling)
+  - `transformSiu()` — SIU S12-S15 → Appointment with participant references
+- **Outbound Transforms** (FHIR R4 → HL7 v2):
+  - `buildOrm()` — ServiceRequest → ORM^O01
+  - `buildAdtA04()` — Patient → ADT^A04
+  - `buildRde()` — MedicationRequest → RDE^O11
+- **Common Mappings**: `pidToPatient()`, `mapGender()`, `parseHl7Date()`, HL7 timestamp conversion
 
 ### `@health-portal/emr-connectors`
 
 FHIR R4 connectors for external EMR systems.
 
 - **`BaseEmrConnector`**: Abstract base with OAuth token management and `fhirRequest()` helper
-- **`EpicConnector`**: JWT-based backend services auth (RS384)
-- **`CernerConnector`**: OAuth 2.0 client credentials (Ignite FHIR R4)
-- **`AthenaConnector`**: OAuth 2.0 client credentials (FHIR R4)
+- **`EpicConnector`**: JWT assertion auth (RS384 signing via `epic-auth.ts`)
+- **`CernerConnector`**: OAuth 2.0 client credentials (via `cerner-auth.ts`)
+- **`AthenaConnector`**: OAuth 2.0 client credentials (via `athena-auth.ts`)
+- **Vendor Mappings** (per-vendor FHIR normalization):
+  - `epic-mappings.ts` — Strips proprietary extensions, handles opaque FHIR ID tokens, maps MRN/FHIR identifier types
+  - `cerner-mappings.ts` — Prefers CMRN for cross-facility matching, handles contained `#fragment` resources, numeric IDs
+  - `athena-mappings.ts` — Strips athena-specific extensions, handles non-standard identifier search format
+  - Each includes `discoverIdentifierSystem()` for auto-detecting vendor OIDs from sample Patient responses
 
 All connectors implement: `authenticate()`, `searchPatient()`, `read()`, `search()`, `write()`, `pullChanges()`, `bulkExport()`
 
@@ -325,9 +353,10 @@ All connectors implement: `authenticate()`, `searchPatient()`, `read()`, `search
 PhenoML AI API integration for clinical NLP.
 
 - **`PhenoMlClient`**: HTTP client with Bearer token auth
-- **`Lang2FhirService`**: Natural language to FHIR resource conversion
+- **`Lang2FhirService`**: Natural language to FHIR resource conversion (create + search)
 - **`ConstructService`**: Medical code extraction (ICD-10, SNOMED, LOINC, RxNorm, CPT)
 - **`AgentService`**: Orchestrated AI agent for complex clinical tasks
+- **`WorkflowService`**: Declarative workflow definitions for recurring clinical AI tasks (create, execute, list, get)
 
 ### `@health-portal/bots`
 
@@ -335,11 +364,21 @@ Medplum bot handlers triggered by FHIR Subscriptions.
 
 | Bot | Trigger | Description |
 |-----|---------|-------------|
-| `patient-onboarding` | Patient created | MPI matching, intake processing |
-| `lab-result-processor` | Observation (lab) | LOINC validation, critical value alerts |
-| `epic-sync` | Cron + resource changes | Bidirectional Epic FHIR sync |
-| `cerner-sync` | Cron + resource changes | Bidirectional Cerner FHIR sync |
-| `athena-sync` | Cron + resource changes | Bidirectional athena FHIR sync |
-| `adt-handler` | Encounter created | ADT post-processing |
-| `oru-handler` | DiagnosticReport created | ORU post-processing |
-| `siu-handler` | Appointment created | SIU post-processing |
+| `patient-onboarding` | Patient created | PhenoML Agent intake processing, document extraction, problem/medication/allergy creation, low-confidence flagging |
+| `lab-result-processor` | Observation (lab) | Construe LOINC code enrichment (auto-apply at >= 0.90 confidence), critical value detection, provider notification |
+| `document-processor` | DocumentReference created | Extract text from attachments, Lang2FHIR conversion, coding validation, Provenance linking |
+| `epic-sync` | Cron + resource changes | Full import/export cycle: authenticate, pull changes, ID remapping, write, Provenance, audit |
+| `cerner-sync` | Cron + resource changes | Same sync pipeline as Epic, using CernerConnector |
+| `athena-sync` | Cron + resource changes | Same sync pipeline as Epic, using AthenaConnector |
+| `adt-handler` | Encounter created | HL7 origin tag validation, demographics consistency check, EMR sync trigger |
+| `oru-handler` | DiagnosticReport created | HL7 origin tag validation, Construe LOINC enrichment, critical value alerts |
+| `siu-handler` | Appointment created | HL7 origin tag validation, participant reference validation, EMR sync, notifications |
+| `notification-sender` | Communication, Appointment, Cron | Email/SMS delivery for messages, appointment reminders (24-48h), critical lab results |
+| `audit-logger` | All writes | Enhanced audit logging, `queryPatientAuditTrail()` for HIPAA accounting of disclosures |
+| `consent-enforcer` | Consent changes | Granular per-resource-type opt-in/opt-out, access policy updates, consent change auditing |
+
+**Sync Utilities** (`sync-utils.ts`):
+- **ID Remapping Pipeline**: `buildIdMap()`, `persistIdMap()`, `loadIdMap()`, `remapReferences()`, `reverseRemapReferences()`
+- **Patient Matching (MPI)**: `deterministicMatch()` (exact name+DOB+gender), `probabilisticMatch()` (weighted scoring, configurable threshold), `findOrCreatePatient()`
+- **Sync State**: `getLastSyncTimestamp()`, `setLastSyncTimestamp()`, `buildSyncAuditEvent()`
+- **Import Helpers**: `sortByDependencyTier()` (6-tier resource ordering), `preserveVendorIdentifier()`, `createImportProvenance()`
